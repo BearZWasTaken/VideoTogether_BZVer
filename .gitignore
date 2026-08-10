@@ -4,3 +4,6 @@ node_modules
 chrome.zip
 xcuserdata/
 *.zip
+source/local/
+source/setting/
+source/website/
