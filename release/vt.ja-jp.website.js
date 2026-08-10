@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Video Together_BZVer 一起看视频
 // @namespace    https://2gether.video/
-// @version      1786345269
+// @version      1786383741
 // @description  Watch video together 一起看视频
 // @author       maggch@outlook.com
 // @match        *://*/*
@@ -3681,7 +3681,7 @@
 
             this.activatedVideo = undefined;
             this.tempUser = generateTempUserId();
-            this.version = '1786345269';
+            this.version = '1786383741';
             this.isMain = (window.self == window.top);
             this.UserId = undefined;
 
@@ -4397,17 +4397,31 @@
                     window.videoTogetherFlyPannel.UpdateStatusText(data.text, data.color);
                     break;
                 case MessageType.JumpToNewPage:
-                    window.location = data.url;
-                    let currentUrl = new URL(window.location);
-                    let newUrl = new URL(data.url);
-                    if (newUrl.hash != "") {
-                        currentUrl.hash = "";
-                        newUrl.hash = "";
-                        if (currentUrl.href == newUrl.href) {
-                            extension.url = data.url;
-                            // window.location.reload();// for hash change
+                    try {
+                        let currentUrl = new URL(window.location);
+                        let newUrl = new URL(data.url);
+                        let compareCurrentUrl = new URL(currentUrl);
+                        let compareNewUrl = new URL(newUrl);
+                        compareCurrentUrl.searchParams.delete("VideoTogetherUrl");
+                        compareCurrentUrl.searchParams.delete("VideoTogetherRoomName");
+                        compareCurrentUrl.searchParams.delete("VideoTogetherRole");
+                        compareCurrentUrl.searchParams.delete("VideoTogetherPassword");
+                        compareCurrentUrl.searchParams.delete("VideoTogetherTimestamp");
+                        compareNewUrl.searchParams.delete("VideoTogetherUrl");
+                        compareNewUrl.searchParams.delete("VideoTogetherRoomName");
+                        compareNewUrl.searchParams.delete("VideoTogetherRole");
+                        compareNewUrl.searchParams.delete("VideoTogetherPassword");
+                        compareNewUrl.searchParams.delete("VideoTogetherTimestamp");
+                        if (compareNewUrl.hash != "") {
+                            compareCurrentUrl.hash = "";
+                            compareNewUrl.hash = "";
                         }
-                    }
+                        if (compareCurrentUrl.href == compareNewUrl.href) {
+                            extension.url = data.url;
+                            break;
+                        }
+                    } catch { }
+                    window.location = data.url;
                     break;
                 case MessageType.ChangeVideoVolume:
                     this.ForEachVideo(video => {
@@ -4814,23 +4828,6 @@
             await WS.sendTextMessage(msgId, `/share ${currentUrl}`);
         }
 
-        jumpMemberToRoomUrl(roomUrl) {
-            if (window.VideoTogetherStorage != undefined && window.VideoTogetherStorage.VideoTogetherTabStorageEnabled) {
-                this.SetTabStorageSuccessCallback = () => {
-                    sendMessageToTop(MessageType.JumpToNewPage, { url: roomUrl });
-                    this.SetTabStorageSuccessCallback = () => { };
-                };
-                sendMessageToTop(MessageType.SetTabStorage, this.GetRoomState(roomUrl));
-                setTimeout(() => this.SetTabStorageSuccessCallback(), 800);
-                return;
-            }
-            if (this.SaveStateToSessionStorageWhenSameOrigin(roomUrl)) {
-                sendMessageToTop(MessageType.JumpToNewPage, { url: roomUrl });
-            } else {
-                sendMessageToTop(MessageType.JumpToNewPage, { url: this.linkWithMemberState(roomUrl).toString() });
-            }
-        }
-
         async SyncTimeWithServer(url = null) {
             if (url == null) {
                 url = this.video_together_host;
@@ -5102,25 +5099,41 @@
                                 window.VideoTogetherEasyShareTitle = room['videoTitle'];
                             }
                         }
-                        const currentPageUrl = this.getCurrentPageUrlWithoutState();
-                        const shouldRedirectToRoom = !this.areUrlsEquivalent(currentPageUrl, newUrl)
-                            && (window.VideoTogetherStorage == undefined || !window.VideoTogetherStorage.DisableRedirectJoin);
-                        if (shouldRedirectToRoom) {
+                        if (newUrl != this.url && (window.VideoTogetherStorage == undefined || !window.VideoTogetherStorage.DisableRedirectJoin)) {
+                            const currentPageUrl = this.getCurrentPageUrlWithoutState();
                             if (this.shouldAutoShareMemberCurrentPage(currentPageUrl, newUrl)) {
                                 await this.autoShareMemberCurrentPage(currentPageUrl, newUrl);
                             }
-                            try {
-                                if (isWeb() && !this._jumping && window.location.origin != (new URL(newUrl).origin)) {
-                                    this._jumping = true;
-                                    alert("ジャンプ後に再度参加してください");
+                            if (window.VideoTogetherStorage != undefined && window.VideoTogetherStorage.VideoTogetherTabStorageEnabled) {
+                                let state = this.GetRoomState(newUrl);
+                                sendMessageToTop(MessageType.SetTabStorage, state);
+                                setInterval(() => {
+                                    if (window.VideoTogetherStorage.VideoTogetherTabStorage.VideoTogetherUrl == newUrl) {
+                                        try {
+                                            if (isWeb()) {
+                                                if (!this._jumping && window.location.origin != (new URL(newUrl).origin)) {
+                                                    this._jumping = true;
+                                                    alert("ジャンプ後に再度参加してください");
+                                                }
+                                            }
+                                        } catch { };
+                                        this.SetTabStorageSuccessCallback = () => {
+                                            sendMessageToTop(MessageType.JumpToNewPage, { url: newUrl });
+                                            this.SetTabStorageSuccessCallback = () => { };
+                                        }
+                                    }
+                                }, 200);
+                            } else {
+                                if (this.SaveStateToSessionStorageWhenSameOrigin(newUrl)) {
+                                    sendMessageToTop(MessageType.JumpToNewPage, { url: newUrl });
+                                } else {
+                                    sendMessageToTop(MessageType.JumpToNewPage, { url: this.linkWithMemberState(newUrl).toString() });
                                 }
-                            } catch { };
-                            this.jumpMemberToRoomUrl(newUrl);
-                            break;
+                            }
+                        } else {
+                            let state = this.GetRoomState("");
+                            sendMessageToTop(MessageType.SetTabStorage, state);
                         }
-                        this.url = newUrl;
-                        let state = this.GetRoomState(newUrl);
-                        sendMessageToTop(MessageType.SetTabStorage, state);
                         if (this.PlayAdNow()) {
                             throw new Error("広告再生中");
                         }
