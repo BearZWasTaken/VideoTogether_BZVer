@@ -293,6 +293,68 @@
         }
     }
 
+    function isSettingPage() {
+        return (window.location.hostname.endsWith("videotogether.github.io")
+            || window.location.hostname.endsWith("2gether.video"))
+            && window.location.pathname.indexOf("/setting/") != -1;
+    }
+
+    function ensureBZVerSettingControls(data = {}) {
+        if (!isSettingPage()) {
+            return;
+        }
+        try {
+            const existing = document.querySelector("#EnableTextMessageVoice");
+            if (existing != undefined) {
+                existing.checked = data.EnableTextMessageVoice === true;
+                return;
+            }
+            const textMessageInput = document.querySelector("#EnableTextMessage");
+            const textMessageRow = textMessageInput?.closest(".mdui-clearfix");
+            if (textMessageRow == undefined) {
+                return;
+            }
+            let labelText = "Read text messages aloud";
+            const lang = navigator.language.toLowerCase();
+            if (lang.startsWith("zh")) {
+                labelText = "文字消息语音播报";
+            } else if (lang.startsWith("ja")) {
+                labelText = "テキストメッセージの読み上げ";
+            }
+            const row = document.createElement("div");
+            row.className = "mdui-clearfix mdui-p-t-2";
+            row.innerHTML = `
+                <a id="EnableTextMessageVoiceLabel">${labelText}</a>
+                <label class="mdui-switch mdui-float-right">
+                    <input id="EnableTextMessageVoice" type="checkbox">
+                    <span class="mdui-switch-icon"></span>
+                </label>
+            `;
+            textMessageRow.after(row);
+            const checkbox = row.querySelector("#EnableTextMessageVoice");
+            checkbox.checked = data.EnableTextMessageVoice === true;
+            checkbox.addEventListener("change", () => {
+                window.postMessage({
+                    source: "VideoTogether",
+                    type: 15,
+                    data: {
+                        key: "EnableTextMessageVoice",
+                        value: checkbox.checked
+                    }
+                }, "*");
+            });
+        } catch { }
+    }
+
+    if (isSettingPage()) {
+        const bzverSettingTimer = setInterval(() => {
+            ensureBZVerSettingControls();
+            if (document.querySelector("#EnableTextMessageVoice") != undefined) {
+                clearInterval(bzverSettingTimer);
+            }
+        }, 500);
+    }
+
     window.addEventListener("message", async e => {
         if (e.data.source == "VideoTogether") {
             switch (e.data.type) {
@@ -467,6 +529,36 @@
                     })
                     break;
                 }
+                case 34: {
+                    try {
+                        const url = new URL(e.data.data.url);
+                        if (url.protocol != "http:" && url.protocol != "https:") {
+                            throw "unsupported url";
+                        }
+                        getBrowser().runtime.sendMessage(JSON.stringify(e.data), response => {
+                            window.postMessage({
+                                source: "VideoTogether",
+                                type: 35,
+                                data: {
+                                    id: e.data.data.id,
+                                    title: response?.title || "",
+                                    error: response?.error
+                                }
+                            }, "*")
+                        })
+                    } catch (error) {
+                        window.postMessage({
+                            source: "VideoTogether",
+                            type: 35,
+                            data: {
+                                id: e.data.data.id,
+                                title: "",
+                                error: error
+                            }
+                        }, "*")
+                    }
+                    break;
+                }
             }
         }
     });
@@ -495,6 +587,7 @@
             } catch (e) {
                 data["VideoTogetherTabStorageEnabled"] = false;
             }
+            ensureBZVerSettingControls(data);
             window.postMessage({
                 source: "VideoTogether",
                 type: 16,

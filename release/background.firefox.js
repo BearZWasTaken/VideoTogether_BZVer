@@ -10,6 +10,25 @@ function generateUUID() {
     );
 }
 
+function decodeHtmlEntities(text) {
+    const namedEntities = {
+        amp: "&",
+        lt: "<",
+        gt: ">",
+        quot: "\"",
+        apos: "'",
+        nbsp: " "
+    };
+    return String(text).replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, code) => {
+        if (code[0] == "#") {
+            const radix = code[1].toLowerCase() == "x" ? 16 : 10;
+            const value = parseInt(code.slice(radix == 16 ? 2 : 1), radix);
+            return Number.isFinite(value) ? String.fromCodePoint(value) : entity;
+        }
+        return namedEntities[code.toLowerCase()] ?? entity;
+    });
+}
+
 async function cleanStorage(beginKey, endKey) {
     if (isSafari) {
         await browser.runtime.sendNativeMessage("VideoTogether.VideoTogether",
@@ -442,6 +461,20 @@ getBrowser().runtime.onMessage.addListener(function (msgText, sender, sendRespon
             }
             sendResponse();
             break;
+        case 34:
+            fetch(msg.data.url, {
+                method: "GET",
+                redirect: "follow"
+            })
+                .then(r => r.text())
+                .then(text => {
+                    const match = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+                    let title = match == null ? "" : match[1];
+                    title = decodeHtmlEntities(title).replace(/\s+/g, " ").trim().slice(0, 120);
+                    sendResponse({ title: title });
+                })
+                .catch(e => sendResponse({ title: "", error: String(e) }));
+            return true;
         case 2001:
             saveToIndexedDB(msg.data.table, msg.data.key, msg.data.data).then(() => {
                 sendResponse({ error: 0 })

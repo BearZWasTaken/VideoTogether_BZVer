@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Video Together 一起看视频
+// @name         Video Together_BZVer 一起看视频
 // @namespace    https://2gether.video/
-// @version      1760446828
+// @version      1786343119
 // @description  Watch video together 一起看视频
 // @author       maggch@outlook.com
 // @match        *://*/*
@@ -559,6 +559,10 @@
         return getVideoTogetherStorage('EnableTextMessage', true);
     }
 
+    function getEnableTextMessageVoice() {
+        return getVideoTogetherStorage('EnableTextMessageVoice', false);
+    }
+
     function getEnableMiniBar() {
         return getVideoTogetherStorage('EnableMiniBar', true);
     }
@@ -1087,6 +1091,10 @@
             })
         },
         async sendTextMessage(id, msg) {
+            msg = await formatTextMessage(msg);
+            if (isEmpty(msg)) {
+                return;
+            }
             this.send({
                 "method": "send_txtmsg",
                 "data": {
@@ -1492,6 +1500,101 @@
         return generateUUID() + ":" + Date.now() / 1000;
     }
 
+    function getDisplaySenderName() {
+        try {
+            const inputName = emptyStrIfUdf(windowPannel?.textMessageNicknameInput?.value).trim();
+            if (!isEmpty(inputName)) {
+                return inputName.slice(0, 24);
+            }
+            const savedName = emptyStrIfUdf(getVideoTogetherStorage('PublicUserName', "")).trim();
+            if (!isEmpty(savedName)) {
+                return savedName.slice(0, 24);
+            }
+            const raw = emptyStrIfUdf(extension.tempUser).split(':')[0];
+            if (!isEmpty(raw)) {
+                return `User-${raw.slice(0, 6)}`;
+            }
+        } catch { }
+        return "user";
+    }
+
+    async function formatTextMessage(msg) {
+        const text = emptyStrIfUdf(msg).trim();
+        if (isEmpty(text)) {
+            return "";
+        }
+        if (/^\[[^\]]+\]\s/.test(text)) {
+            return text;
+        }
+        const sharedVideo = parseSharedVideoMessage(text);
+        if (sharedVideo != undefined) {
+            const title = isEmpty(sharedVideo.title) ? await fetchPageTitle(sharedVideo.url) : sharedVideo.title;
+            const encodedTitle = encodeURIComponent(emptyStrIfUdf(title).trim().slice(0, 120));
+            return `[${getDisplaySenderName()}] /share ${sharedVideo.url}${isEmpty(encodedTitle) ? "" : " " + encodedTitle}`;
+        }
+        return `[${getDisplaySenderName()}] ${text}`;
+    }
+
+    function getSharedVideoDisplayTitle(sharedVideo) {
+        if (sharedVideo == undefined) {
+            return "";
+        }
+        if (!isEmpty(sharedVideo.title)) {
+            return sharedVideo.title;
+        }
+        try {
+            const url = new URL(sharedVideo.url);
+            return url.hostname + url.pathname;
+        } catch {
+            return sharedVideo.url;
+        }
+    }
+
+    function fetchPageTitle(url) {
+        return new Promise(resolve => {
+            const id = generateUUID();
+            const timer = setTimeout(() => {
+                window.removeEventListener("message", listener);
+                resolve("");
+            }, 4000);
+            const listener = e => {
+                if (e.data.source != "VideoTogether" || e.data.type != MessageType.FetchPageTitleResp || e.data.data.id != id) {
+                    return;
+                }
+                clearTimeout(timer);
+                window.removeEventListener("message", listener);
+                resolve(emptyStrIfUdf(e.data.data.title).trim());
+            };
+            window.addEventListener("message", listener);
+            sendMessageToTop(MessageType.FetchPageTitleReq, { id: id, url: url });
+        });
+    }
+
+    function parseSharedVideoMessage(msg) {
+        const text = emptyStrIfUdf(msg).trim();
+        const match = text.match(/^(?:\[([^\]]+)\]\s*)?\/share\s+(\S+)(?:\s+(.+))?$/i);
+        if (match == null) {
+            return undefined;
+        }
+        try {
+            const url = new URL(match[2]);
+            if (url.protocol != "http:" && url.protocol != "https:") {
+                return undefined;
+            }
+            let title = emptyStrIfUdf(match[3]).trim();
+            try {
+                title = decodeURIComponent(title);
+            } catch { }
+            return {
+                sender: emptyStrIfUdf(match[1]),
+                url: url.toString(),
+                title: title
+            };
+        } catch {
+            return undefined;
+        }
+    }
+
     /**
      *
      *  Base64 encode / decode
@@ -1637,22 +1740,34 @@
         constructor() {
             this.sessionKey = "VideoTogetherFlySaveSessionKey";
             this.isInRoom = false;
+            this.textMessageHistory = [];
 
             this.isMain = (window.self == window.top);
             setInterval(() => {
-                if (getEnableMiniBar() && getEnableTextMessage() && document.fullscreenElement != undefined
+                const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
+                if (getEnableMiniBar() && getEnableTextMessage() && fullscreenElement != undefined
                     && (extension.ctxRole == extension.RoleEnum.Master || extension.ctxRole == extension.RoleEnum.Member)) {
-                    const qs = (s) => this.fullscreenWrapper.querySelector(s);
                     try {
+                        const qs = (s) => this.fullscreenWrapper.querySelector(s);
                         qs("#memberCount").innerText = extension.ctxMemberCount;
                         qs("#send-button").disabled = !extension.ctxWsIsOpen;
                     } catch { };
-                    if (document.fullscreenElement.contains(this.fullscreenSWrapper)) {
+                    if (fullscreenElement.contains(this.fullscreenSWrapper)) {
                         return;
                     }
+                    try {
+                        this.fullscreenSWrapper.remove();
+                    } catch { }
                     let shadowWrapper = document.createElement("div");
                     this.fullscreenSWrapper = shadowWrapper;
                     shadowWrapper.id = "VideoTogetherfullscreenSWrapper";
+                    shadowWrapper.style.position = "absolute";
+                    shadowWrapper.style.top = "0";
+                    shadowWrapper.style.left = "0";
+                    shadowWrapper.style.width = "100%";
+                    shadowWrapper.style.height = "100%";
+                    shadowWrapper.style.zIndex = "2147483647";
+                    shadowWrapper.style.pointerEvents = "none";
                     let wrapper;
                     try {
                         wrapper = AttachShadow(shadowWrapper, { mode: "open" });
@@ -1672,10 +1787,17 @@
         width: fit-content;
         justify-content: center;
         border-radius: 5px;
-        opacity: 80%;
+        opacity: 0.2;
         background: #000;
         color: white;
         z-index: 2147483647;
+        pointer-events: auto;
+        transition: opacity 0.18s ease;
+    }
+
+    .container:hover,
+    .container:focus-within {
+        opacity: 1;
     }
 
     .container input[type='text'] {
@@ -1740,6 +1862,15 @@
     .container button:disabled:hover {
         background-color: rgb(76, 76, 76);
     }
+
+    .vt-text-chat-stack {
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+    }
+
+    .vt-text-chat-stack::-webkit-scrollbar {
+        display: none;
+    }
 </style>
 <div class="container" id="container">
     <button id="expand-button">&lt;</button>
@@ -1750,13 +1881,20 @@
     <button id="close-btn">x</button>
     <input style="margin: 0 0 0 5px;" type="text" placeholder="文字聊天" id="text-input" class="expand" />
     <button id="send-button">发送</button>
-</div>`);
-                    document.fullscreenElement.appendChild(shadowWrapper);
+</div>
+`);
+                    fullscreenElement.appendChild(shadowWrapper);
                     var container = wrapper.getElementById('container');
                     let expandBtn = wrapper.getElementById('expand-button');
                     let msgInput = wrapper.getElementById('text-input');
                     let sendBtn = wrapper.getElementById('send-button');
                     let closeBtn = wrapper.getElementById('close-btn');
+                    this.ensureTextMessageToast(container, "fullscreen");
+                    let isFullscreenInputHovered = false;
+                    msgInput.addEventListener("mouseenter", () => { isFullscreenInputHovered = true; });
+                    msgInput.addEventListener("mouseleave", () => { isFullscreenInputHovered = false; });
+                    msgInput.addEventListener("focus", () => this.showTextMessageHistory("fullscreen"));
+                    msgInput.addEventListener("blur", () => this.restoreTextMessageLiveStack("fullscreen"));
                     let expanded = true;
                     function expand() {
                         if (expanded) {
@@ -1776,10 +1914,14 @@
                     sendBtn.onclick = () => {
                         extension.currentSendingMsgId = generateUUID();
                         sendMessageToTop(MessageType.SendTxtMsg, { currentSendingMsgId: extension.currentSendingMsgId, value: msgInput.value });
+                        if (!isFullscreenInputHovered) {
+                            msgInput.blur();
+                        }
                     }
                     GotTxtMsgCallback = (id, msg) => {
                         console.log(id, msg);
-                        if (id == extension.currentSendingMsgId && msg == msgInput.value) {
+                        windowPannel.showTextMessageToast(msg, "fullscreen");
+                        if (id == extension.currentSendingMsgId) {
                             msgInput.value = "";
                         }
                     }
@@ -1816,10 +1958,10 @@
                 updateInnnerHTML(wrapper, `<div id="peer" style="display: none;"></div>
 <div id="videoTogetherFlyPannel" style="display: none;">
   <div id="videoTogetherHeader" class="vt-modal-header">
-    <div style="display: flex;align-items: center;">
+    <div class="vt-modal-brand">
       <img style="width: 16px; height: 16px;"
         src="data:image/png;base64,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">
-      <div class="vt-modal-title">VideoTogether</div>
+      <div class="vt-modal-title">VideoTogether_BZVer</div>
     </div>
 
     <button id="downloadBtn" type="button" class="vt-modal-title-button vt-modal-easyshare">
@@ -1904,6 +2046,9 @@
           <input id="videoTogetherRoomPdIpt" autocomplete="off" placeholder="输入建房密码">
         </div>
         <div>
+          <div id="textMessageNickname" style="display: none; margin-bottom: 6px;">
+            <input id="textMessageNicknameInput" autocomplete="off" maxlength="24" placeholder="输入昵称">
+          </div>
           <div id="textMessageChat" style="display: none;">
             <input id="textMessageInput" autocomplete="off" placeholder="文字聊天">
             <button id="textMessageSend" class="vt-btn vt-btn-primary" type="button">
@@ -2092,8 +2237,8 @@
     position: fixed;
     bottom: 15px;
     right: 15px;
-    width: 260px;
-    height: 210px;
+    width: 320px;
+    height: 260px;
     text-align: center;
     border: solid 1px #e9e9e9 !important;
     box-shadow: 0 3px 6px -4px #0000001f, 0 6px 16px #00000014, 0 9px 28px 8px #0000000d;
@@ -2106,6 +2251,13 @@
     touch-action: none;
     align-items: center;
     display: flex;
+  }
+
+  .vt-modal-brand {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    max-width: 205px;
   }
 
   .vt-modal-content {
@@ -2214,10 +2366,13 @@
     font-size: 16px;
     line-height: 22px;
     word-wrap: break-word;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .vt-modal-body {
-    height: 164px;
+    height: 214px;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -2226,6 +2381,8 @@
     color: black;
     border-radius: 0 0 10px 10px;
     background-size: cover;
+    box-sizing: border-box;
+    padding-bottom: 64px;
   }
 
   .vt-modal-footer {
@@ -2345,7 +2502,8 @@
   }
 
   #videoTogetherRoomNameInput,
-  #videoTogetherRoomPdIpt {
+  #videoTogetherRoomPdIpt,
+  #textMessageNicknameInput {
     width: 150px;
     height: auto;
     font-family: inherit;
@@ -2356,6 +2514,11 @@
     background-color: #ffffff;
     border: 1px solid #e9e9e9;
     margin: 0;
+  }
+
+  #textMessageNickname {
+    display: flex;
+    justify-content: center;
   }
 
   .lds-ellipsis {
@@ -2619,7 +2782,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-</style>`);
+
+  .vt-text-chat-stack {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .vt-text-chat-stack::-webkit-scrollbar {
+    display: none;
+  }
+</style>
+`);
                 (document.body || document.documentElement).appendChild(shadowWrapper);
 
                 wrapper.querySelector("#videoTogetherMinimize").onclick = () => { this.Minimize() }
@@ -2643,9 +2816,17 @@
                         wrapper.querySelector("#textMessageSend").click();
                     }
                 });
+                let isMainTextMessageInputHovered = false;
+                wrapper.querySelector("#textMessageInput").addEventListener("mouseenter", () => { isMainTextMessageInputHovered = true; });
+                wrapper.querySelector("#textMessageInput").addEventListener("mouseleave", () => { isMainTextMessageInputHovered = false; });
+                wrapper.querySelector("#textMessageInput").addEventListener("focus", () => this.showTextMessageHistory("main"));
+                wrapper.querySelector("#textMessageInput").addEventListener("blur", () => this.restoreTextMessageLiveStack("main"));
                 wrapper.querySelector("#textMessageSend").onclick = async () => {
                     extension.currentSendingMsgId = generateUUID();
                     WS.sendTextMessage(extension.currentSendingMsgId, select("#textMessageInput").value);
+                    if (!isMainTextMessageInputHovered) {
+                        select("#textMessageInput").blur();
+                    }
                 }
                 this.lobbyBtnGroup = wrapper.querySelector("#lobbyBtnGroup");
                 this.createRoomButton = wrapper.querySelector('#videoTogetherCreateButton');
@@ -2661,10 +2842,25 @@
                 this.callVolumeSlider = wrapper.querySelector("#callVolume");
                 this.callErrorBtn = wrapper.querySelector("#callErrorBtn");
                 this.easyShareCopyBtn = wrapper.querySelector("#easyShareCopyBtn");
+                this.textMessageNickname = wrapper.querySelector("#textMessageNickname");
+                this.textMessageNicknameInput = wrapper.querySelector("#textMessageNicknameInput");
                 this.textMessageChat = wrapper.querySelector("#textMessageChat");
+                this.ensureTextMessageToast(this.textMessageChat, "main");
                 this.textMessageConnecting = wrapper.querySelector("#textMessageConnecting");
                 this.textMessageConnectingStatus = wrapper.querySelector("#textMessageConnectingStatus");
                 this.zhcnTtsMissing = wrapper.querySelector("#zhcnTtsMissing");
+                const saveTextMessageNickname = () => {
+                    const value = emptyStrIfUdf(this.textMessageNicknameInput.value).trim().slice(0, 24);
+                    this.textMessageNicknameInput.value = value;
+                    sendMessageToTop(MessageType.SetStorageValue, { key: "PublicUserName", value: value });
+                };
+                this.textMessageNicknameInput.addEventListener("change", saveTextMessageNickname);
+                this.textMessageNicknameInput.addEventListener("input", saveTextMessageNickname);
+                this.textMessageNicknameInput.addEventListener("keyup", e => {
+                    if (e.key == "Enter") {
+                        this.textMessageNicknameInput.blur();
+                    }
+                });
                 this.downloadBtn = wrapper.querySelector("#downloadBtn");
                 hide(this.downloadBtn);
                 this.confirmDownloadBtn = wrapper.querySelector("#confirmDownloadBtn")
@@ -2793,7 +2989,18 @@
                 });
                 this.videoTogetherRoleText = wrapper.querySelector("#videoTogetherRoleText")
                 this.videoTogetherSetting = wrapper.querySelector("#videoTogetherSetting");
-                hide(this.videoTogetherSetting);
+                if (!isWeb()) {
+                    this.videoTogetherSetting.href = "https://videotogether.github.io/setting/v2.html";
+                    show(this.videoTogetherSetting);
+                } else {
+                    hide(this.videoTogetherSetting);
+                }
+                this.videoTogetherSetting.onclick = (e) => {
+                    if (window.VideoTogetherStorage == undefined || window.VideoTogetherStorage.UserscriptType == undefined) {
+                        e.preventDefault();
+                        alert("当前单脚本测试版没有启用设置页所需的跨站存储桥，远程设置页不会生效。");
+                    }
+                };
                 this.inputRoomName = wrapper.querySelector('#videoTogetherRoomNameInput');
                 this.inputRoomPassword = wrapper.querySelector("#videoTogetherRoomPdIpt");
                 this.inputRoomNameLabel = wrapper.querySelector('#videoTogetherRoomNameLabel');
@@ -2814,6 +3021,223 @@
             try {
                 document.querySelector("#videoTogetherLoading").remove()
             } catch { }
+        }
+
+        ensureTextMessageToast(container, key) {
+            if (container == undefined) {
+                return undefined;
+            }
+            const root = key == "fullscreen" ? container.getRootNode() : container;
+            let chatStack = root.querySelector(`[data-vt-text-chat-stack="${key}"]`);
+            if (chatStack != undefined) {
+                return chatStack;
+            }
+            let anchor = container;
+            let relativeParent = container.parentElement;
+            if (key == "fullscreen") {
+                anchor = root;
+                relativeParent = undefined;
+            } else if (container.parentElement != undefined) {
+                anchor = container.parentElement;
+                relativeParent = container.parentElement;
+            }
+            if (relativeParent != undefined && (relativeParent.style.position == "" || relativeParent.style.position == "static")) {
+                relativeParent.style.position = "relative";
+            } else if (anchor.style != undefined && (anchor.style.position == "" || anchor.style.position == "static")) {
+                anchor.style.position = "relative";
+            }
+            chatStack = document.createElement("div");
+            chatStack.setAttribute("data-vt-text-chat-stack", key);
+            chatStack.className = `vt-text-chat-stack vt-text-chat-stack-${key}`;
+            chatStack.style.boxSizing = "border-box";
+            chatStack.style.position = "absolute";
+            chatStack.style.left = key == "fullscreen" ? "8px" : "0";
+            if (key == "fullscreen") {
+                chatStack.style.top = "calc(50% - 8px)";
+                chatStack.style.transform = "translateY(-100%)";
+            } else {
+                chatStack.style.bottom = "calc(100% + 8px)";
+            }
+            chatStack.style.zIndex = "2147483647";
+            chatStack.style.width = key == "fullscreen" ? "min(360px, calc(100vw - 16px))" : "260px";
+            chatStack.style.maxHeight = key == "fullscreen" ? "40vh" : "150px";
+            chatStack.style.display = "flex";
+            chatStack.style.flexDirection = "column";
+            chatStack.style.justifyContent = "flex-end";
+            chatStack.style.alignItems = "flex-start";
+            chatStack.style.gap = "6px";
+            chatStack.style.overflow = "hidden";
+            chatStack.style.pointerEvents = "none";
+            chatStack.addEventListener("wheel", e => {
+                if (chatStack.getAttribute("data-vt-history-expanded") != "true") {
+                    return;
+                }
+                e.preventDefault();
+                e.stopPropagation();
+                chatStack.scrollBy({
+                    top: e.deltaY,
+                    behavior: "auto"
+                });
+            }, { passive: false });
+            anchor.appendChild(chatStack);
+            return chatStack;
+        }
+
+        setTextMessageHistory(history) {
+            if (!Array.isArray(history)) {
+                this.textMessageHistory = [];
+                return;
+            }
+            this.textMessageHistory = history
+                .map(msg => emptyStrIfUdf(msg))
+                .filter(msg => !isEmpty(msg))
+                .slice(-100);
+        }
+
+        persistTextMessageHistory() {
+            try {
+                extension.persistTextMessageHistory(this.textMessageHistory || []);
+            } catch { }
+        }
+
+        recordTextMessageHistory(msg) {
+            if (isEmpty(msg)) {
+                return;
+            }
+            if (this.textMessageHistory == undefined) {
+                this.textMessageHistory = [];
+            }
+            this.textMessageHistory.push(msg);
+            if (this.textMessageHistory.length > 100) {
+                this.textMessageHistory.splice(0, this.textMessageHistory.length - 100);
+            }
+            this.persistTextMessageHistory();
+        }
+
+        createTextMessageBubble(msg, key) {
+            const bubble = document.createElement("div");
+            const sharedVideo = parseSharedVideoMessage(msg);
+            bubble.textContent = sharedVideo == undefined
+                ? msg
+                : `${isEmpty(sharedVideo.sender) ? "有人" : sharedVideo.sender} 分享视频：${getSharedVideoDisplayTitle(sharedVideo)}`;
+            bubble.style.boxSizing = "border-box";
+            bubble.style.maxWidth = "100%";
+            bubble.style.padding = "7px 10px";
+            bubble.style.borderRadius = "8px";
+            bubble.style.background = "rgba(0, 0, 0, 0.72)";
+            bubble.style.color = "#fff";
+            bubble.style.fontSize = key == "fullscreen" ? "14px" : "13px";
+            bubble.style.lineHeight = "1.35";
+            bubble.style.overflowWrap = "anywhere";
+            bubble.style.boxShadow = "0 6px 16px rgba(0, 0, 0, 0.18)";
+            if (sharedVideo != undefined) {
+                bubble.setAttribute("data-vt-shared-video-url", sharedVideo.url);
+                bubble.style.background = "linear-gradient(135deg, rgba(24, 144, 255, 0.92), rgba(0, 108, 180, 0.92))";
+                bubble.style.border = "1px solid rgba(255, 255, 255, 0.28)";
+                bubble.style.pointerEvents = "auto";
+                bubble.style.cursor = extension.role == extension.RoleEnum.Master ? "pointer" : "default";
+                bubble.title = extension.role == extension.RoleEnum.Master ? "点击跳转到这个视频" : "分享给房主的视频";
+                let jumpTriggered = false;
+                const jumpToSharedVideo = e => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (jumpTriggered || extension.role != extension.RoleEnum.Master) {
+                        return;
+                    }
+                    jumpTriggered = true;
+                    let targetUrl = sharedVideo.url;
+                    try {
+                        targetUrl = extension.linkWithMemberState(sharedVideo.url, extension.RoleEnum.Master).toString();
+                    } catch { }
+                    sendMessageToTop(MessageType.JumpToNewPage, { url: targetUrl });
+                };
+                bubble.addEventListener("pointerdown", jumpToSharedVideo);
+                bubble.addEventListener("mousedown", jumpToSharedVideo);
+                bubble.onclick = jumpToSharedVideo;
+            }
+            return bubble;
+        }
+
+        getTextMessageStack(key) {
+            if (key == "fullscreen") {
+                return this.fullscreenWrapper?.querySelector(`[data-vt-text-chat-stack="${key}"]`);
+            }
+            return this.wrapper?.querySelector(`[data-vt-text-chat-stack="${key}"]`);
+        }
+
+        showTextMessageHistory(key = "main") {
+            const chatStack = this.getTextMessageStack(key);
+            if (chatStack == undefined) {
+                return;
+            }
+            chatStack.setAttribute("data-vt-history-expanded", "true");
+            chatStack.style.maxHeight = key == "fullscreen" ? "55vh" : "210px";
+            chatStack.style.overflowY = "auto";
+            chatStack.style.pointerEvents = "auto";
+            chatStack.style.justifyContent = "flex-start";
+            chatStack.innerHTML = "";
+            for (const msg of (this.textMessageHistory || [])) {
+                const bubble = this.createTextMessageBubble(msg, key);
+                bubble.style.opacity = "1";
+                bubble.style.transform = "translateY(0)";
+                chatStack.appendChild(bubble);
+            }
+            chatStack.scrollTop = chatStack.scrollHeight;
+        }
+
+        restoreTextMessageLiveStack(key = "main") {
+            const chatStack = this.getTextMessageStack(key);
+            if (chatStack == undefined) {
+                return;
+            }
+            chatStack.removeAttribute("data-vt-history-expanded");
+            chatStack.style.maxHeight = key == "fullscreen" ? "40vh" : "150px";
+            chatStack.style.overflowY = "hidden";
+            chatStack.style.pointerEvents = "none";
+            chatStack.style.justifyContent = "flex-end";
+            chatStack.innerHTML = "";
+        }
+
+        showTextMessageToast(msg, key = "main") {
+            if (isEmpty(msg)) {
+                return;
+            }
+            let chatStack = this.getTextMessageStack(key);
+            if (chatStack == undefined) {
+                return;
+            }
+            if (chatStack.getAttribute("data-vt-history-expanded") == "true") {
+                this.showTextMessageHistory(key);
+                return;
+            }
+            const bubble = this.createTextMessageBubble(msg, key);
+            bubble.style.opacity = "0";
+            bubble.style.transform = "translateY(8px)";
+            bubble.style.transition = "opacity 0.18s ease, transform 0.18s ease";
+            chatStack.appendChild(bubble);
+            if (bubble.getAttribute("data-vt-shared-video-url") != undefined) {
+                chatStack.style.pointerEvents = "auto";
+            }
+
+            while (chatStack.children.length > 6) {
+                chatStack.firstElementChild.remove();
+            }
+
+            requestAnimationFrame(() => {
+                bubble.style.opacity = "1";
+                bubble.style.transform = "translateY(0)";
+            });
+            setTimeout(() => {
+                bubble.style.opacity = "0";
+                bubble.style.transform = "translateY(-8px)";
+                setTimeout(() => {
+                    bubble.remove();
+                    if (chatStack.getAttribute("data-vt-history-expanded") != "true"
+                        && chatStack.querySelector("[data-vt-shared-video-url]") == undefined) {
+                        chatStack.style.pointerEvents = "none";
+                    }
+                }, 180);
+            }, 5000);
         }
 
         ShowTxtMsgTouchPannel() {
@@ -2856,10 +3280,11 @@
             });
             document.body.appendChild(touch);
 
-            this.setTxtMsgTouchPannelText("VideoTogether: 您有一条新消息，点击屏幕接收");
+            this.setTxtMsgTouchPannelText("VideoTogether_BZVer: 您有一条新消息，点击屏幕接收");
         }
 
         setTxtMsgInterface(type) {
+            hide(this.textMessageNickname);
             hide(this.textMessageChat);
             hide(this.textMessageConnecting);
             hide(this.textMessageConnectingStatus);
@@ -2868,6 +3293,7 @@
 
             }
             if (type == 1) {
+                show(this.textMessageNickname);
                 show(this.textMessageChat);
             }
             if (type == 2) {
@@ -3088,6 +3514,8 @@
         GotTxtMsg: 31,
         StartDownload: 32,
         DownloadStatus: 33,
+        FetchPageTitleReq: 34,
+        FetchPageTitleResp: 35,
 
 
         UpdateM3u8Files: 1001,
@@ -3175,7 +3603,7 @@
 
             this.activatedVideo = undefined;
             this.tempUser = generateTempUserId();
-            this.version = '1760446828';
+            this.version = '1786343119';
             this.isMain = (window.self == window.top);
             this.UserId = undefined;
 
@@ -3273,17 +3701,26 @@
             if (idx > speechSynthesis.getVoices().length) {
                 return;
             }
+            try {
+                if (id == this.currentSendingMsgId) {
+                    select("#textMessageInput").value = "";
+                }
+            } catch { }
+            if (!prepare) {
+                try {
+                    windowPannel.recordTextMessageHistory(msg);
+                    windowPannel.showTextMessageToast(msg, "main");
+                } catch { }
+            }
+            if (!getEnableTextMessageVoice()) {
+                return;
+            }
             if (!prepare && !extension.speechSynthesisEnabled) {
                 windowPannel.ShowTxtMsgTouchPannel();
                 for (let i = 0; i <= 1000 && !extension.speechSynthesisEnabled; i++) {
                     await new Promise(r => setTimeout(r, 100));
                 }
             }
-            try {
-                if (id == this.currentSendingMsgId && msg == select("#textMessageInput").value) {
-                    select("#textMessageInput").value = "";
-                }
-            } catch { }
 
             // iOS cannot play audio in background
             if (!isEmpty(audioUrl) && !this.isIos) {
@@ -3904,6 +4341,10 @@
                     } catch { };
                     break;
                 }
+                case MessageType.FetchPageTitleResp: {
+                    this.sendMessageToSonWithContext(type, data);
+                    break;
+                }
                 case MessageType.SyncStorageValue: {
                     const firstSync = (window.VideoTogetherSettingEnabled == undefined)
                     window.VideoTogetherStorage = data;
@@ -3929,6 +4370,12 @@
                     try {
                         if (data.PublicMessageVoice != null) {
                             windowPannel.voiceSelect.value = data.PublicMessageVoice;
+                        }
+                    } catch { };
+                    try {
+                        if (windowPannel.textMessageNicknameInput != undefined) {
+                            const nickname = emptyStrIfUdf(data.PublicUserName).trim().slice(0, 24);
+                            windowPannel.textMessageNicknameInput.value = nickname;
                         }
                     } catch { };
                     if (!window.videoTogetherFlyPannel.disableDefaultSize && firstSync) {
@@ -4202,6 +4649,44 @@
             return Date.now() / 1000 + this.timeOffset;
         }
 
+        normalizeTextMessageHistory(history) {
+            if (typeof history == "string") {
+                try {
+                    history = JSON.parse(history);
+                } catch {
+                    history = [];
+                }
+            }
+            if (!Array.isArray(history)) {
+                return [];
+            }
+            return history
+                .map(msg => emptyStrIfUdf(msg))
+                .filter(msg => !isEmpty(msg))
+                .slice(-100);
+        }
+
+        getTextMessageHistoryState(history = undefined) {
+            if (history == undefined) {
+                try {
+                    history = window.videoTogetherFlyPannel.textMessageHistory;
+                } catch {
+                    history = [];
+                }
+            }
+            return this.normalizeTextMessageHistory(history);
+        }
+
+        persistTextMessageHistory(history = undefined) {
+            if (this.role == this.RoleEnum.Null || inDownload) {
+                return;
+            }
+            const state = this.GetRoomState(this.url);
+            state.VideoTogetherTextMessageHistory = this.getTextMessageHistoryState(history);
+            sendMessageToTop(MessageType.SetTabStorage, state);
+            this.SaveStateToSessionStorageWhenSameOrigin(this.url);
+        }
+
         async SyncTimeWithServer(url = null) {
             if (url == null) {
                 url = this.video_together_host;
@@ -4224,6 +4709,7 @@
                 let timestamp = parseFloat(getFunc("VideoTogetherTimestamp"));
                 let password = getFunc("VideoTogetherPassword");
                 let voice = getFunc("VideoTogetherVoice");
+                let textMessageHistory = this.normalizeTextMessageHistory(getFunc("VideoTogetherTextMessageHistory"));
                 if (timestamp + 60 < Date.now() / 1000) {
                     return;
                 }
@@ -4236,6 +4722,7 @@
                         this.password = password;
                         window.videoTogetherFlyPannel.inputRoomName.value = vtRoomName;
                         window.videoTogetherFlyPannel.inputRoomPassword.value = password;
+                        window.videoTogetherFlyPannel.setTextMessageHistory(textMessageHistory);
                         window.videoTogetherFlyPannel.InRoom();
                         switch (voice) {
                             case VoiceStatus.MUTED:
@@ -4303,6 +4790,9 @@
             window.videoTogetherFlyPannel.inputRoomPassword.value = "";
             this.roomName = "";
             this.setRole(this.RoleEnum.Null);
+            try {
+                window.videoTogetherFlyPannel.setTextMessageHistory([]);
+            } catch { }
             window.videoTogetherFlyPannel.InLobby();
             let state = this.GetRoomState("");
             sendMessageToTop(MessageType.SetTabStorage, state);
@@ -4697,7 +5187,8 @@
                 VideoTogetherTimestamp: Date.now() / 1000,
                 VideoTogetherVoice: voice,
                 VideoVolume: this.getVideoVolume(),
-                VoiceVolume: this.getVoiceVolume()
+                VoiceVolume: this.getVoiceVolume(),
+                VideoTogetherTextMessageHistory: this.getTextMessageHistoryState()
             }
         }
 
@@ -4719,6 +5210,7 @@
                     window.sessionStorage.setItem("VideoTogetherPassword", this.password);
                     window.sessionStorage.setItem("VideoTogetherRole", this.role);
                     window.sessionStorage.setItem("VideoTogetherTimestamp", Date.now() / 1000);
+                    window.sessionStorage.setItem("VideoTogetherTextMessageHistory", JSON.stringify(this.getTextMessageHistoryState()));
                     return sameOrigin;
                 } else {
                     return false;

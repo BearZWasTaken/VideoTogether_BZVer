@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Video Together 一起看视频
+// @name         Video Together_BZVer 一起看视频
 // @namespace    https://2gether.video/
 // @version      {{timestamp}}
 // @description  Watch video together 一起看视频
@@ -156,6 +156,10 @@
 
     function getEnableTextMessage() {
         return getVideoTogetherStorage('EnableTextMessage', true);
+    }
+
+    function getEnableTextMessageVoice() {
+        return getVideoTogetherStorage('EnableTextMessageVoice', false);
     }
 
     function getEnableMiniBar() {
@@ -686,6 +690,10 @@
             })
         },
         async sendTextMessage(id, msg) {
+            msg = await formatTextMessage(msg);
+            if (isEmpty(msg)) {
+                return;
+            }
             this.send({
                 "method": "send_txtmsg",
                 "data": {
@@ -1091,6 +1099,101 @@
         return generateUUID() + ":" + Date.now() / 1000;
     }
 
+    function getDisplaySenderName() {
+        try {
+            const inputName = emptyStrIfUdf(windowPannel?.textMessageNicknameInput?.value).trim();
+            if (!isEmpty(inputName)) {
+                return inputName.slice(0, 24);
+            }
+            const savedName = emptyStrIfUdf(getVideoTogetherStorage('PublicUserName', "")).trim();
+            if (!isEmpty(savedName)) {
+                return savedName.slice(0, 24);
+            }
+            const raw = emptyStrIfUdf(extension.tempUser).split(':')[0];
+            if (!isEmpty(raw)) {
+                return `User-${raw.slice(0, 6)}`;
+            }
+        } catch { }
+        return "user";
+    }
+
+    async function formatTextMessage(msg) {
+        const text = emptyStrIfUdf(msg).trim();
+        if (isEmpty(text)) {
+            return "";
+        }
+        if (/^\[[^\]]+\]\s/.test(text)) {
+            return text;
+        }
+        const sharedVideo = parseSharedVideoMessage(text);
+        if (sharedVideo != undefined) {
+            const title = isEmpty(sharedVideo.title) ? await fetchPageTitle(sharedVideo.url) : sharedVideo.title;
+            const encodedTitle = encodeURIComponent(emptyStrIfUdf(title).trim().slice(0, 120));
+            return `[${getDisplaySenderName()}] /share ${sharedVideo.url}${isEmpty(encodedTitle) ? "" : " " + encodedTitle}`;
+        }
+        return `[${getDisplaySenderName()}] ${text}`;
+    }
+
+    function getSharedVideoDisplayTitle(sharedVideo) {
+        if (sharedVideo == undefined) {
+            return "";
+        }
+        if (!isEmpty(sharedVideo.title)) {
+            return sharedVideo.title;
+        }
+        try {
+            const url = new URL(sharedVideo.url);
+            return url.hostname + url.pathname;
+        } catch {
+            return sharedVideo.url;
+        }
+    }
+
+    function fetchPageTitle(url) {
+        return new Promise(resolve => {
+            const id = generateUUID();
+            const timer = setTimeout(() => {
+                window.removeEventListener("message", listener);
+                resolve("");
+            }, 4000);
+            const listener = e => {
+                if (e.data.source != "VideoTogether" || e.data.type != MessageType.FetchPageTitleResp || e.data.data.id != id) {
+                    return;
+                }
+                clearTimeout(timer);
+                window.removeEventListener("message", listener);
+                resolve(emptyStrIfUdf(e.data.data.title).trim());
+            };
+            window.addEventListener("message", listener);
+            sendMessageToTop(MessageType.FetchPageTitleReq, { id: id, url: url });
+        });
+    }
+
+    function parseSharedVideoMessage(msg) {
+        const text = emptyStrIfUdf(msg).trim();
+        const match = text.match(/^(?:\[([^\]]+)\]\s*)?\/share\s+(\S+)(?:\s+(.+))?$/i);
+        if (match == null) {
+            return undefined;
+        }
+        try {
+            const url = new URL(match[2]);
+            if (url.protocol != "http:" && url.protocol != "https:") {
+                return undefined;
+            }
+            let title = emptyStrIfUdf(match[3]).trim();
+            try {
+                title = decodeURIComponent(title);
+            } catch { }
+            return {
+                sender: emptyStrIfUdf(match[1]),
+                url: url.toString(),
+                title: title
+            };
+        } catch {
+            return undefined;
+        }
+    }
+
     /**
      *
      *  Base64 encode / decode
@@ -1236,22 +1339,34 @@
         constructor() {
             this.sessionKey = "VideoTogetherFlySaveSessionKey";
             this.isInRoom = false;
+            this.textMessageHistory = [];
 
             this.isMain = (window.self == window.top);
             setInterval(() => {
-                if (getEnableMiniBar() && getEnableTextMessage() && document.fullscreenElement != undefined
+                const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
+                if (getEnableMiniBar() && getEnableTextMessage() && fullscreenElement != undefined
                     && (extension.ctxRole == extension.RoleEnum.Master || extension.ctxRole == extension.RoleEnum.Member)) {
-                    const qs = (s) => this.fullscreenWrapper.querySelector(s);
                     try {
+                        const qs = (s) => this.fullscreenWrapper.querySelector(s);
                         qs("#memberCount").innerText = extension.ctxMemberCount;
                         qs("#send-button").disabled = !extension.ctxWsIsOpen;
                     } catch { };
-                    if (document.fullscreenElement.contains(this.fullscreenSWrapper)) {
+                    if (fullscreenElement.contains(this.fullscreenSWrapper)) {
                         return;
                     }
+                    try {
+                        this.fullscreenSWrapper.remove();
+                    } catch { }
                     let shadowWrapper = document.createElement("div");
                     this.fullscreenSWrapper = shadowWrapper;
                     shadowWrapper.id = "VideoTogetherfullscreenSWrapper";
+                    shadowWrapper.style.position = "absolute";
+                    shadowWrapper.style.top = "0";
+                    shadowWrapper.style.left = "0";
+                    shadowWrapper.style.width = "100%";
+                    shadowWrapper.style.height = "100%";
+                    shadowWrapper.style.zIndex = "2147483647";
+                    shadowWrapper.style.pointerEvents = "none";
                     let wrapper;
                     try {
                         wrapper = AttachShadow(shadowWrapper, { mode: "open" });
@@ -1259,12 +1374,18 @@
                         this.fullscreenWrapper = wrapper;
                     } catch (e) { console.error(e); }
                     updateInnnerHTML(wrapper, `{{{ {"": "./html/fullscreen.html","order":100} }}}`);
-                    document.fullscreenElement.appendChild(shadowWrapper);
+                    fullscreenElement.appendChild(shadowWrapper);
                     var container = wrapper.getElementById('container');
                     let expandBtn = wrapper.getElementById('expand-button');
                     let msgInput = wrapper.getElementById('text-input');
                     let sendBtn = wrapper.getElementById('send-button');
                     let closeBtn = wrapper.getElementById('close-btn');
+                    this.ensureTextMessageToast(container, "fullscreen");
+                    let isFullscreenInputHovered = false;
+                    msgInput.addEventListener("mouseenter", () => { isFullscreenInputHovered = true; });
+                    msgInput.addEventListener("mouseleave", () => { isFullscreenInputHovered = false; });
+                    msgInput.addEventListener("focus", () => this.showTextMessageHistory("fullscreen"));
+                    msgInput.addEventListener("blur", () => this.restoreTextMessageLiveStack("fullscreen"));
                     let expanded = true;
                     function expand() {
                         if (expanded) {
@@ -1284,10 +1405,14 @@
                     sendBtn.onclick = () => {
                         extension.currentSendingMsgId = generateUUID();
                         sendMessageToTop(MessageType.SendTxtMsg, { currentSendingMsgId: extension.currentSendingMsgId, value: msgInput.value });
+                        if (!isFullscreenInputHovered) {
+                            msgInput.blur();
+                        }
                     }
                     GotTxtMsgCallback = (id, msg) => {
                         console.log(id, msg);
-                        if (id == extension.currentSendingMsgId && msg == msgInput.value) {
+                        windowPannel.showTextMessageToast(msg, "fullscreen");
+                        if (id == extension.currentSendingMsgId) {
                             msgInput.value = "";
                         }
                     }
@@ -1345,9 +1470,17 @@
                         wrapper.querySelector("#textMessageSend").click();
                     }
                 });
+                let isMainTextMessageInputHovered = false;
+                wrapper.querySelector("#textMessageInput").addEventListener("mouseenter", () => { isMainTextMessageInputHovered = true; });
+                wrapper.querySelector("#textMessageInput").addEventListener("mouseleave", () => { isMainTextMessageInputHovered = false; });
+                wrapper.querySelector("#textMessageInput").addEventListener("focus", () => this.showTextMessageHistory("main"));
+                wrapper.querySelector("#textMessageInput").addEventListener("blur", () => this.restoreTextMessageLiveStack("main"));
                 wrapper.querySelector("#textMessageSend").onclick = async () => {
                     extension.currentSendingMsgId = generateUUID();
                     WS.sendTextMessage(extension.currentSendingMsgId, select("#textMessageInput").value);
+                    if (!isMainTextMessageInputHovered) {
+                        select("#textMessageInput").blur();
+                    }
                 }
                 this.lobbyBtnGroup = wrapper.querySelector("#lobbyBtnGroup");
                 this.createRoomButton = wrapper.querySelector('#videoTogetherCreateButton');
@@ -1363,10 +1496,25 @@
                 this.callVolumeSlider = wrapper.querySelector("#callVolume");
                 this.callErrorBtn = wrapper.querySelector("#callErrorBtn");
                 this.easyShareCopyBtn = wrapper.querySelector("#easyShareCopyBtn");
+                this.textMessageNickname = wrapper.querySelector("#textMessageNickname");
+                this.textMessageNicknameInput = wrapper.querySelector("#textMessageNicknameInput");
                 this.textMessageChat = wrapper.querySelector("#textMessageChat");
+                this.ensureTextMessageToast(this.textMessageChat, "main");
                 this.textMessageConnecting = wrapper.querySelector("#textMessageConnecting");
                 this.textMessageConnectingStatus = wrapper.querySelector("#textMessageConnectingStatus");
                 this.zhcnTtsMissing = wrapper.querySelector("#zhcnTtsMissing");
+                const saveTextMessageNickname = () => {
+                    const value = emptyStrIfUdf(this.textMessageNicknameInput.value).trim().slice(0, 24);
+                    this.textMessageNicknameInput.value = value;
+                    sendMessageToTop(MessageType.SetStorageValue, { key: "PublicUserName", value: value });
+                };
+                this.textMessageNicknameInput.addEventListener("change", saveTextMessageNickname);
+                this.textMessageNicknameInput.addEventListener("input", saveTextMessageNickname);
+                this.textMessageNicknameInput.addEventListener("keyup", e => {
+                    if (e.key == "Enter") {
+                        this.textMessageNicknameInput.blur();
+                    }
+                });
                 this.downloadBtn = wrapper.querySelector("#downloadBtn");
                 hide(this.downloadBtn);
                 this.confirmDownloadBtn = wrapper.querySelector("#confirmDownloadBtn")
@@ -1495,7 +1643,18 @@
                 });
                 this.videoTogetherRoleText = wrapper.querySelector("#videoTogetherRoleText")
                 this.videoTogetherSetting = wrapper.querySelector("#videoTogetherSetting");
-                hide(this.videoTogetherSetting);
+                if (!isWeb()) {
+                    this.videoTogetherSetting.href = "https://videotogether.github.io/setting/v2.html";
+                    show(this.videoTogetherSetting);
+                } else {
+                    hide(this.videoTogetherSetting);
+                }
+                this.videoTogetherSetting.onclick = (e) => {
+                    if (window.VideoTogetherStorage == undefined || window.VideoTogetherStorage.UserscriptType == undefined) {
+                        e.preventDefault();
+                        alert("当前单脚本测试版没有启用设置页所需的跨站存储桥，远程设置页不会生效。");
+                    }
+                };
                 this.inputRoomName = wrapper.querySelector('#videoTogetherRoomNameInput');
                 this.inputRoomPassword = wrapper.querySelector("#videoTogetherRoomPdIpt");
                 this.inputRoomNameLabel = wrapper.querySelector('#videoTogetherRoomNameLabel');
@@ -1516,6 +1675,223 @@
             try {
                 document.querySelector("#videoTogetherLoading").remove()
             } catch { }
+        }
+
+        ensureTextMessageToast(container, key) {
+            if (container == undefined) {
+                return undefined;
+            }
+            const root = key == "fullscreen" ? container.getRootNode() : container;
+            let chatStack = root.querySelector(`[data-vt-text-chat-stack="${key}"]`);
+            if (chatStack != undefined) {
+                return chatStack;
+            }
+            let anchor = container;
+            let relativeParent = container.parentElement;
+            if (key == "fullscreen") {
+                anchor = root;
+                relativeParent = undefined;
+            } else if (container.parentElement != undefined) {
+                anchor = container.parentElement;
+                relativeParent = container.parentElement;
+            }
+            if (relativeParent != undefined && (relativeParent.style.position == "" || relativeParent.style.position == "static")) {
+                relativeParent.style.position = "relative";
+            } else if (anchor.style != undefined && (anchor.style.position == "" || anchor.style.position == "static")) {
+                anchor.style.position = "relative";
+            }
+            chatStack = document.createElement("div");
+            chatStack.setAttribute("data-vt-text-chat-stack", key);
+            chatStack.className = `vt-text-chat-stack vt-text-chat-stack-${key}`;
+            chatStack.style.boxSizing = "border-box";
+            chatStack.style.position = "absolute";
+            chatStack.style.left = key == "fullscreen" ? "8px" : "0";
+            if (key == "fullscreen") {
+                chatStack.style.top = "calc(50% - 8px)";
+                chatStack.style.transform = "translateY(-100%)";
+            } else {
+                chatStack.style.bottom = "calc(100% + 8px)";
+            }
+            chatStack.style.zIndex = "2147483647";
+            chatStack.style.width = key == "fullscreen" ? "min(360px, calc(100vw - 16px))" : "260px";
+            chatStack.style.maxHeight = key == "fullscreen" ? "40vh" : "150px";
+            chatStack.style.display = "flex";
+            chatStack.style.flexDirection = "column";
+            chatStack.style.justifyContent = "flex-end";
+            chatStack.style.alignItems = "flex-start";
+            chatStack.style.gap = "6px";
+            chatStack.style.overflow = "hidden";
+            chatStack.style.pointerEvents = "none";
+            chatStack.addEventListener("wheel", e => {
+                if (chatStack.getAttribute("data-vt-history-expanded") != "true") {
+                    return;
+                }
+                e.preventDefault();
+                e.stopPropagation();
+                chatStack.scrollBy({
+                    top: e.deltaY,
+                    behavior: "auto"
+                });
+            }, { passive: false });
+            anchor.appendChild(chatStack);
+            return chatStack;
+        }
+
+        setTextMessageHistory(history) {
+            if (!Array.isArray(history)) {
+                this.textMessageHistory = [];
+                return;
+            }
+            this.textMessageHistory = history
+                .map(msg => emptyStrIfUdf(msg))
+                .filter(msg => !isEmpty(msg))
+                .slice(-100);
+        }
+
+        persistTextMessageHistory() {
+            try {
+                extension.persistTextMessageHistory(this.textMessageHistory || []);
+            } catch { }
+        }
+
+        recordTextMessageHistory(msg) {
+            if (isEmpty(msg)) {
+                return;
+            }
+            if (this.textMessageHistory == undefined) {
+                this.textMessageHistory = [];
+            }
+            this.textMessageHistory.push(msg);
+            if (this.textMessageHistory.length > 100) {
+                this.textMessageHistory.splice(0, this.textMessageHistory.length - 100);
+            }
+            this.persistTextMessageHistory();
+        }
+
+        createTextMessageBubble(msg, key) {
+            const bubble = document.createElement("div");
+            const sharedVideo = parseSharedVideoMessage(msg);
+            bubble.textContent = sharedVideo == undefined
+                ? msg
+                : `${isEmpty(sharedVideo.sender) ? "有人" : sharedVideo.sender} 分享视频：${getSharedVideoDisplayTitle(sharedVideo)}`;
+            bubble.style.boxSizing = "border-box";
+            bubble.style.maxWidth = "100%";
+            bubble.style.padding = "7px 10px";
+            bubble.style.borderRadius = "8px";
+            bubble.style.background = "rgba(0, 0, 0, 0.72)";
+            bubble.style.color = "#fff";
+            bubble.style.fontSize = key == "fullscreen" ? "14px" : "13px";
+            bubble.style.lineHeight = "1.35";
+            bubble.style.overflowWrap = "anywhere";
+            bubble.style.boxShadow = "0 6px 16px rgba(0, 0, 0, 0.18)";
+            if (sharedVideo != undefined) {
+                bubble.setAttribute("data-vt-shared-video-url", sharedVideo.url);
+                bubble.style.background = "linear-gradient(135deg, rgba(24, 144, 255, 0.92), rgba(0, 108, 180, 0.92))";
+                bubble.style.border = "1px solid rgba(255, 255, 255, 0.28)";
+                bubble.style.pointerEvents = "auto";
+                bubble.style.cursor = extension.role == extension.RoleEnum.Master ? "pointer" : "default";
+                bubble.title = extension.role == extension.RoleEnum.Master ? "点击跳转到这个视频" : "分享给房主的视频";
+                let jumpTriggered = false;
+                const jumpToSharedVideo = e => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (jumpTriggered || extension.role != extension.RoleEnum.Master) {
+                        return;
+                    }
+                    jumpTriggered = true;
+                    let targetUrl = sharedVideo.url;
+                    try {
+                        targetUrl = extension.linkWithMemberState(sharedVideo.url, extension.RoleEnum.Master).toString();
+                    } catch { }
+                    sendMessageToTop(MessageType.JumpToNewPage, { url: targetUrl });
+                };
+                bubble.addEventListener("pointerdown", jumpToSharedVideo);
+                bubble.addEventListener("mousedown", jumpToSharedVideo);
+                bubble.onclick = jumpToSharedVideo;
+            }
+            return bubble;
+        }
+
+        getTextMessageStack(key) {
+            if (key == "fullscreen") {
+                return this.fullscreenWrapper?.querySelector(`[data-vt-text-chat-stack="${key}"]`);
+            }
+            return this.wrapper?.querySelector(`[data-vt-text-chat-stack="${key}"]`);
+        }
+
+        showTextMessageHistory(key = "main") {
+            const chatStack = this.getTextMessageStack(key);
+            if (chatStack == undefined) {
+                return;
+            }
+            chatStack.setAttribute("data-vt-history-expanded", "true");
+            chatStack.style.maxHeight = key == "fullscreen" ? "55vh" : "210px";
+            chatStack.style.overflowY = "auto";
+            chatStack.style.pointerEvents = "auto";
+            chatStack.style.justifyContent = "flex-start";
+            chatStack.innerHTML = "";
+            for (const msg of (this.textMessageHistory || [])) {
+                const bubble = this.createTextMessageBubble(msg, key);
+                bubble.style.opacity = "1";
+                bubble.style.transform = "translateY(0)";
+                chatStack.appendChild(bubble);
+            }
+            chatStack.scrollTop = chatStack.scrollHeight;
+        }
+
+        restoreTextMessageLiveStack(key = "main") {
+            const chatStack = this.getTextMessageStack(key);
+            if (chatStack == undefined) {
+                return;
+            }
+            chatStack.removeAttribute("data-vt-history-expanded");
+            chatStack.style.maxHeight = key == "fullscreen" ? "40vh" : "150px";
+            chatStack.style.overflowY = "hidden";
+            chatStack.style.pointerEvents = "none";
+            chatStack.style.justifyContent = "flex-end";
+            chatStack.innerHTML = "";
+        }
+
+        showTextMessageToast(msg, key = "main") {
+            if (isEmpty(msg)) {
+                return;
+            }
+            let chatStack = this.getTextMessageStack(key);
+            if (chatStack == undefined) {
+                return;
+            }
+            if (chatStack.getAttribute("data-vt-history-expanded") == "true") {
+                this.showTextMessageHistory(key);
+                return;
+            }
+            const bubble = this.createTextMessageBubble(msg, key);
+            bubble.style.opacity = "0";
+            bubble.style.transform = "translateY(8px)";
+            bubble.style.transition = "opacity 0.18s ease, transform 0.18s ease";
+            chatStack.appendChild(bubble);
+            if (bubble.getAttribute("data-vt-shared-video-url") != undefined) {
+                chatStack.style.pointerEvents = "auto";
+            }
+
+            while (chatStack.children.length > 6) {
+                chatStack.firstElementChild.remove();
+            }
+
+            requestAnimationFrame(() => {
+                bubble.style.opacity = "1";
+                bubble.style.transform = "translateY(0)";
+            });
+            setTimeout(() => {
+                bubble.style.opacity = "0";
+                bubble.style.transform = "translateY(-8px)";
+                setTimeout(() => {
+                    bubble.remove();
+                    if (chatStack.getAttribute("data-vt-history-expanded") != "true"
+                        && chatStack.querySelector("[data-vt-shared-video-url]") == undefined) {
+                        chatStack.style.pointerEvents = "none";
+                    }
+                }, 180);
+            }, 5000);
         }
 
         ShowTxtMsgTouchPannel() {
@@ -1562,6 +1938,7 @@
         }
 
         setTxtMsgInterface(type) {
+            hide(this.textMessageNickname);
             hide(this.textMessageChat);
             hide(this.textMessageConnecting);
             hide(this.textMessageConnectingStatus);
@@ -1570,6 +1947,7 @@
 
             }
             if (type == 1) {
+                show(this.textMessageNickname);
                 show(this.textMessageChat);
             }
             if (type == 2) {
@@ -1790,6 +2168,8 @@
         GotTxtMsg: 31,
         StartDownload: 32,
         DownloadStatus: 33,
+        FetchPageTitleReq: 34,
+        FetchPageTitleResp: 35,
 
 
         UpdateM3u8Files: 1001,
@@ -1975,17 +2355,26 @@
             if (idx > speechSynthesis.getVoices().length) {
                 return;
             }
+            try {
+                if (id == this.currentSendingMsgId) {
+                    select("#textMessageInput").value = "";
+                }
+            } catch { }
+            if (!prepare) {
+                try {
+                    windowPannel.recordTextMessageHistory(msg);
+                    windowPannel.showTextMessageToast(msg, "main");
+                } catch { }
+            }
+            if (!getEnableTextMessageVoice()) {
+                return;
+            }
             if (!prepare && !extension.speechSynthesisEnabled) {
                 windowPannel.ShowTxtMsgTouchPannel();
                 for (let i = 0; i <= 1000 && !extension.speechSynthesisEnabled; i++) {
                     await new Promise(r => setTimeout(r, 100));
                 }
             }
-            try {
-                if (id == this.currentSendingMsgId && msg == select("#textMessageInput").value) {
-                    select("#textMessageInput").value = "";
-                }
-            } catch { }
 
             // iOS cannot play audio in background
             if (!isEmpty(audioUrl) && !this.isIos) {
@@ -2606,6 +2995,10 @@
                     } catch { };
                     break;
                 }
+                case MessageType.FetchPageTitleResp: {
+                    this.sendMessageToSonWithContext(type, data);
+                    break;
+                }
                 case MessageType.SyncStorageValue: {
                     const firstSync = (window.VideoTogetherSettingEnabled == undefined)
                     window.VideoTogetherStorage = data;
@@ -2631,6 +3024,12 @@
                     try {
                         if (data.PublicMessageVoice != null) {
                             windowPannel.voiceSelect.value = data.PublicMessageVoice;
+                        }
+                    } catch { };
+                    try {
+                        if (windowPannel.textMessageNicknameInput != undefined) {
+                            const nickname = emptyStrIfUdf(data.PublicUserName).trim().slice(0, 24);
+                            windowPannel.textMessageNicknameInput.value = nickname;
                         }
                     } catch { };
                     if (!window.videoTogetherFlyPannel.disableDefaultSize && firstSync) {
@@ -2904,6 +3303,44 @@
             return Date.now() / 1000 + this.timeOffset;
         }
 
+        normalizeTextMessageHistory(history) {
+            if (typeof history == "string") {
+                try {
+                    history = JSON.parse(history);
+                } catch {
+                    history = [];
+                }
+            }
+            if (!Array.isArray(history)) {
+                return [];
+            }
+            return history
+                .map(msg => emptyStrIfUdf(msg))
+                .filter(msg => !isEmpty(msg))
+                .slice(-100);
+        }
+
+        getTextMessageHistoryState(history = undefined) {
+            if (history == undefined) {
+                try {
+                    history = window.videoTogetherFlyPannel.textMessageHistory;
+                } catch {
+                    history = [];
+                }
+            }
+            return this.normalizeTextMessageHistory(history);
+        }
+
+        persistTextMessageHistory(history = undefined) {
+            if (this.role == this.RoleEnum.Null || inDownload) {
+                return;
+            }
+            const state = this.GetRoomState(this.url);
+            state.VideoTogetherTextMessageHistory = this.getTextMessageHistoryState(history);
+            sendMessageToTop(MessageType.SetTabStorage, state);
+            this.SaveStateToSessionStorageWhenSameOrigin(this.url);
+        }
+
         async SyncTimeWithServer(url = null) {
             if (url == null) {
                 url = this.video_together_host;
@@ -2926,6 +3363,7 @@
                 let timestamp = parseFloat(getFunc("VideoTogetherTimestamp"));
                 let password = getFunc("VideoTogetherPassword");
                 let voice = getFunc("VideoTogetherVoice");
+                let textMessageHistory = this.normalizeTextMessageHistory(getFunc("VideoTogetherTextMessageHistory"));
                 if (timestamp + 60 < Date.now() / 1000) {
                     return;
                 }
@@ -2938,6 +3376,7 @@
                         this.password = password;
                         window.videoTogetherFlyPannel.inputRoomName.value = vtRoomName;
                         window.videoTogetherFlyPannel.inputRoomPassword.value = password;
+                        window.videoTogetherFlyPannel.setTextMessageHistory(textMessageHistory);
                         window.videoTogetherFlyPannel.InRoom();
                         switch (voice) {
                             case VoiceStatus.MUTED:
@@ -3005,6 +3444,9 @@
             window.videoTogetherFlyPannel.inputRoomPassword.value = "";
             this.roomName = "";
             this.setRole(this.RoleEnum.Null);
+            try {
+                window.videoTogetherFlyPannel.setTextMessageHistory([]);
+            } catch { }
             window.videoTogetherFlyPannel.InLobby();
             let state = this.GetRoomState("");
             sendMessageToTop(MessageType.SetTabStorage, state);
@@ -3399,7 +3841,8 @@
                 VideoTogetherTimestamp: Date.now() / 1000,
                 VideoTogetherVoice: voice,
                 VideoVolume: this.getVideoVolume(),
-                VoiceVolume: this.getVoiceVolume()
+                VoiceVolume: this.getVoiceVolume(),
+                VideoTogetherTextMessageHistory: this.getTextMessageHistoryState()
             }
         }
 
@@ -3421,6 +3864,7 @@
                     window.sessionStorage.setItem("VideoTogetherPassword", this.password);
                     window.sessionStorage.setItem("VideoTogetherRole", this.role);
                     window.sessionStorage.setItem("VideoTogetherTimestamp", Date.now() / 1000);
+                    window.sessionStorage.setItem("VideoTogetherTextMessageHistory", JSON.stringify(this.getTextMessageHistoryState()));
                     return sameOrigin;
                 } else {
                     return false;
