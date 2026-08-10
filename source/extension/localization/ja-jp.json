@@ -40,6 +40,7 @@
     "textMessageSend": "送信",
     "textMessageInput": "テキストメッセージ",
     "textMessageNicknameInput": "ニックネーム",
+    "textMessageAutoShare": "自動共有",
     "zhcnTtsMissing": "中国語音声パックがありません",
     "you_have_a_new_msg": "VideoTogether_BZVer: 新しいメッセージがあります。画面をクリックして受信してください",
     "new_message_change_voice": "新しいメッセージ (<a id='changeVoiceBtn' style='color:inherit' href='#''>音声変更</a>)",

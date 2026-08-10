@@ -40,6 +40,7 @@
     "textMessageSend": "Send",
     "textMessageInput": "Text Message",
     "textMessageNicknameInput": "Nickname",
+    "textMessageAutoShare": "Auto share",
     "zhcnTtsMissing": "",
     "you_have_a_new_msg": "VideoTogether_BZVer: You got a new message, click the screen to receive",
     "new_message_change_voice": "New Messages (<a id='changeVoiceBtn' style='color:inherit' href='#''>Change Voice</a>)",

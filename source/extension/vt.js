@@ -162,6 +162,10 @@
         return getVideoTogetherStorage('EnableTextMessageVoice', false);
     }
 
+    function getEnableAutoShareOnNavigate() {
+        return getVideoTogetherStorage('PublicAutoShareOnNavigate', false);
+    }
+
     function getEnableMiniBar() {
         return getVideoTogetherStorage('EnableMiniBar', true);
     }
@@ -1498,6 +1502,8 @@
                 this.easyShareCopyBtn = wrapper.querySelector("#easyShareCopyBtn");
                 this.textMessageNickname = wrapper.querySelector("#textMessageNickname");
                 this.textMessageNicknameInput = wrapper.querySelector("#textMessageNicknameInput");
+                this.textMessageAutoShare = wrapper.querySelector("#textMessageAutoShare");
+                this.textMessageAutoShareInput = wrapper.querySelector("#textMessageAutoShareInput");
                 this.textMessageChat = wrapper.querySelector("#textMessageChat");
                 this.ensureTextMessageToast(this.textMessageChat, "main");
                 this.textMessageConnecting = wrapper.querySelector("#textMessageConnecting");
@@ -1514,6 +1520,13 @@
                     if (e.key == "Enter") {
                         this.textMessageNicknameInput.blur();
                     }
+                });
+                this.textMessageAutoShareInput.checked = getEnableAutoShareOnNavigate();
+                this.textMessageAutoShareInput.addEventListener("change", () => {
+                    sendMessageToTop(MessageType.SetStorageValue, {
+                        key: "PublicAutoShareOnNavigate",
+                        value: this.textMessageAutoShareInput.checked
+                    });
                 });
                 this.downloadBtn = wrapper.querySelector("#downloadBtn");
                 hide(this.downloadBtn);
@@ -1939,6 +1952,8 @@
 
         setTxtMsgInterface(type) {
             hide(this.textMessageNickname);
+            hide(this.textMessageAutoShare);
+            this.textMessageAutoShare?.classList.remove("vt-auto-share-visible");
             hide(this.textMessageChat);
             hide(this.textMessageConnecting);
             hide(this.textMessageConnectingStatus);
@@ -1948,6 +1963,10 @@
             }
             if (type == 1) {
                 show(this.textMessageNickname);
+                this.textMessageAutoShare?.classList.add("vt-auto-share-visible");
+                if (this.textMessageAutoShare != undefined) {
+                    this.textMessageAutoShare.style.display = "flex";
+                }
                 show(this.textMessageChat);
             }
             if (type == 2) {
@@ -2276,6 +2295,8 @@
             this.downloadSpeedMb = 0;
             this.downloadPercentage = 0;
             this.currentSendingMsgId = null;
+            this.lastAutoSharedMemberPageUrl = "";
+            this.lastAutoSharedMemberPageTs = 0;
 
             this.isIos = undefined;
             this.speechSynthesisEnabled = false;
@@ -3031,6 +3052,9 @@
                             const nickname = emptyStrIfUdf(data.PublicUserName).trim().slice(0, 24);
                             windowPannel.textMessageNicknameInput.value = nickname;
                         }
+                        if (windowPannel.textMessageAutoShareInput != undefined) {
+                            windowPannel.textMessageAutoShareInput.checked = data.PublicAutoShareOnNavigate === true;
+                        }
                     } catch { };
                     if (!window.videoTogetherFlyPannel.disableDefaultSize && firstSync) {
                         if (data.MinimiseDefault) {
@@ -3341,6 +3365,67 @@
             this.SaveStateToSessionStorageWhenSameOrigin(this.url);
         }
 
+        areUrlsEquivalent(a, b) {
+            if (isEmpty(a) || isEmpty(b)) {
+                return false;
+            }
+            try {
+                return new URL(a).href == new URL(b).href;
+            } catch {
+                return a == b;
+            }
+        }
+
+        getCurrentPageUrlWithoutState() {
+            try {
+                return this.linkWithoutState(window.location);
+            } catch {
+                return window.location.href;
+            }
+        }
+
+        shouldAutoShareMemberCurrentPage(currentUrl, roomUrl) {
+            if (!getEnableAutoShareOnNavigate()) {
+                return false;
+            }
+            if (this.role != this.RoleEnum.Member || isEmpty(currentUrl) || isEmpty(roomUrl)) {
+                return false;
+            }
+            return !this.areUrlsEquivalent(currentUrl, roomUrl);
+        }
+
+        async autoShareMemberCurrentPage(currentUrl, roomUrl) {
+            if (isEmpty(currentUrl) || this.areUrlsEquivalent(currentUrl, roomUrl)) {
+                return;
+            }
+            const now = Date.now() / 1000;
+            if (this.areUrlsEquivalent(currentUrl, this.lastAutoSharedMemberPageUrl)
+                && this.lastAutoSharedMemberPageTs + 600 > now) {
+                return;
+            }
+            this.lastAutoSharedMemberPageUrl = currentUrl;
+            this.lastAutoSharedMemberPageTs = now;
+            const msgId = generateUUID();
+            await WS.sendTextMessage(msgId, `/share ${currentUrl}`);
+        }
+
+        jumpMemberToRoomUrl(roomUrl) {
+            if (window.VideoTogetherStorage != undefined && window.VideoTogetherStorage.VideoTogetherTabStorageEnabled) {
+                this.SetTabStorageSuccessCallback = () => {
+                    sendMessageToTop(MessageType.JumpToNewPage, { url: roomUrl });
+                    this.SetTabStorageSuccessCallback = () => { };
+                };
+                sendMessageToTop(MessageType.SetTabStorage, this.GetRoomState(roomUrl));
+                setTimeout(() => this.SetTabStorageSuccessCallback(), 800);
+                return;
+            }
+            if (this.SaveStateToSessionStorageWhenSameOrigin(roomUrl)) {
+                sendMessageToTop(MessageType.JumpToNewPage, { url: roomUrl });
+            } else {
+                sendMessageToTop(MessageType.JumpToNewPage, { url: this.linkWithMemberState(roomUrl).toString() });
+            }
+        }
+
         async SyncTimeWithServer(url = null) {
             if (url == null) {
                 url = this.video_together_host;
@@ -3364,6 +3449,8 @@
                 let password = getFunc("VideoTogetherPassword");
                 let voice = getFunc("VideoTogetherVoice");
                 let textMessageHistory = this.normalizeTextMessageHistory(getFunc("VideoTogetherTextMessageHistory"));
+                let lastAutoSharedMemberPageUrl = emptyStrIfUdf(getFunc("VideoTogetherLastAutoSharedMemberPageUrl"));
+                let lastAutoSharedMemberPageTs = parseFloat(getFunc("VideoTogetherLastAutoSharedMemberPageTs"));
                 if (timestamp + 60 < Date.now() / 1000) {
                     return;
                 }
@@ -3374,6 +3461,8 @@
                         this.url = vtUrl;
                         this.roomName = vtRoomName;
                         this.password = password;
+                        this.lastAutoSharedMemberPageUrl = lastAutoSharedMemberPageUrl;
+                        this.lastAutoSharedMemberPageTs = isNaN(lastAutoSharedMemberPageTs) ? 0 : lastAutoSharedMemberPageTs;
                         window.videoTogetherFlyPannel.inputRoomName.value = vtRoomName;
                         window.videoTogetherFlyPannel.inputRoomPassword.value = password;
                         window.videoTogetherFlyPannel.setTextMessageHistory(textMessageHistory);
@@ -3608,37 +3697,25 @@
                                 window.VideoTogetherEasyShareTitle = room['videoTitle'];
                             }
                         }
-                        if (newUrl != this.url && (window.VideoTogetherStorage == undefined || !window.VideoTogetherStorage.DisableRedirectJoin)) {
-                            if (window.VideoTogetherStorage != undefined && window.VideoTogetherStorage.VideoTogetherTabStorageEnabled) {
-                                let state = this.GetRoomState(newUrl);
-                                sendMessageToTop(MessageType.SetTabStorage, state);
-                                setInterval(() => {
-                                    if (window.VideoTogetherStorage.VideoTogetherTabStorage.VideoTogetherUrl == newUrl) {
-                                        try {
-                                            if (isWeb()) {
-                                                if (!this._jumping && window.location.origin != (new URL(newUrl).origin)) {
-                                                    this._jumping = true;
-                                                    alert("{$please_join_again_after_jump$}");
-                                                }
-                                            }
-                                        } catch { };
-                                        this.SetTabStorageSuccessCallback = () => {
-                                            sendMessageToTop(MessageType.JumpToNewPage, { url: newUrl });
-                                            this.SetTabStorageSuccessCallback = () => { };
-                                        }
-                                    }
-                                }, 200);
-                            } else {
-                                if (this.SaveStateToSessionStorageWhenSameOrigin(newUrl)) {
-                                    sendMessageToTop(MessageType.JumpToNewPage, { url: newUrl });
-                                } else {
-                                    sendMessageToTop(MessageType.JumpToNewPage, { url: this.linkWithMemberState(newUrl).toString() });
-                                }
+                        const currentPageUrl = this.getCurrentPageUrlWithoutState();
+                        const shouldRedirectToRoom = !this.areUrlsEquivalent(currentPageUrl, newUrl)
+                            && (window.VideoTogetherStorage == undefined || !window.VideoTogetherStorage.DisableRedirectJoin);
+                        if (shouldRedirectToRoom) {
+                            if (this.shouldAutoShareMemberCurrentPage(currentPageUrl, newUrl)) {
+                                await this.autoShareMemberCurrentPage(currentPageUrl, newUrl);
                             }
-                        } else {
-                            let state = this.GetRoomState("");
-                            sendMessageToTop(MessageType.SetTabStorage, state);
+                            try {
+                                if (isWeb() && !this._jumping && window.location.origin != (new URL(newUrl).origin)) {
+                                    this._jumping = true;
+                                    alert("{$please_join_again_after_jump$}");
+                                }
+                            } catch { };
+                            this.jumpMemberToRoomUrl(newUrl);
+                            break;
                         }
+                        this.url = newUrl;
+                        let state = this.GetRoomState(newUrl);
+                        sendMessageToTop(MessageType.SetTabStorage, state);
                         if (this.PlayAdNow()) {
                             throw new Error("{$ad_playing$}");
                         }
@@ -3842,7 +3919,9 @@
                 VideoTogetherVoice: voice,
                 VideoVolume: this.getVideoVolume(),
                 VoiceVolume: this.getVoiceVolume(),
-                VideoTogetherTextMessageHistory: this.getTextMessageHistoryState()
+                VideoTogetherTextMessageHistory: this.getTextMessageHistoryState(),
+                VideoTogetherLastAutoSharedMemberPageUrl: this.lastAutoSharedMemberPageUrl,
+                VideoTogetherLastAutoSharedMemberPageTs: this.lastAutoSharedMemberPageTs
             }
         }
 
@@ -3865,6 +3944,8 @@
                     window.sessionStorage.setItem("VideoTogetherRole", this.role);
                     window.sessionStorage.setItem("VideoTogetherTimestamp", Date.now() / 1000);
                     window.sessionStorage.setItem("VideoTogetherTextMessageHistory", JSON.stringify(this.getTextMessageHistoryState()));
+                    window.sessionStorage.setItem("VideoTogetherLastAutoSharedMemberPageUrl", this.lastAutoSharedMemberPageUrl);
+                    window.sessionStorage.setItem("VideoTogetherLastAutoSharedMemberPageTs", this.lastAutoSharedMemberPageTs);
                     return sameOrigin;
                 } else {
                     return false;
