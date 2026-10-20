@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Video Together 一起看视频
 // @namespace    https://videotogether.github.io/
-// @version      1786342744
+// @version      1792511477
 // @description  Watch video together 一起看视频
 // @author       maggch@outlook.com
 // @match        *://*/*
@@ -32,7 +32,7 @@
         return;
     }
 
-    let version = '1786342744'
+    let version = '1792511477'
     let type = 'website_debug'
     function getBrowser() {
         switch (type) {
@@ -248,8 +248,11 @@
         } catch (e) { };
     }
 
-    async function SetTabStorage(data) {
-        try {
+    let tabStorageWrites = Promise.resolve();
+    function SetTabStorage(data) {
+        // History and navigation can write concurrently. Preserve message order
+        // so an older save cannot replace the state used by the next document.
+        tabStorageWrites = tabStorageWrites.then(async () => {
             let tabObj = await getGM().getTab();
             tabObj.VideoTogetherTabStorage = data;
             await getGM().saveTab(tabObj);
@@ -257,8 +260,9 @@
                 source: "VideoTogether",
                 type: 19,
                 data: tabObj.VideoTogetherTabStorage
-            })
-        } catch (e) { };
+            });
+        }).catch(() => {});
+        return tabStorageWrites;
     }
 
     if (window.VideoTogetherLoading) {

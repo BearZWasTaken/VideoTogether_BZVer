@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Video Together_BZVer 一起看视频
 // @namespace    https://2gether.video/
-// @version      1786383741
+// @version      1792511477
 // @description  Watch video together 一起看视频
 // @author       maggch@outlook.com
 // @match        *://*/*
@@ -3681,7 +3681,7 @@
 
             this.activatedVideo = undefined;
             this.tempUser = generateTempUserId();
-            this.version = '1786383741';
+            this.version = '1792511477';
             this.isMain = (window.self == window.top);
             this.UserId = undefined;
 
@@ -3700,13 +3700,13 @@
             this.downloadSpeedMb = 0;
             this.downloadPercentage = 0;
             this.currentSendingMsgId = null;
-            this.lastAutoSharedMemberPageUrl = "";
-            this.lastAutoSharedMemberPageTs = 0;
+            this.memberPageUrl = "";
+            this.pendingMemberNavigation = null;
+            this.memberRoomRequestId = 0;
 
             this.isIos = undefined;
             this.speechSynthesisEnabled = false;
             // we need a common callback function to deal with all message
-            this.SetTabStorageSuccessCallback = () => { };
             document.addEventListener("securitypolicyviolation", (e) => {
                 try {
                     let host = (new URL(e.blockedURI)).host;
@@ -3835,6 +3835,12 @@
         }
 
         setRole(role) {
+            if (this.role != role) {
+                this.url = "";
+                this.memberPageUrl = "";
+                this.pendingMemberNavigation = null;
+                this.memberRoomRequestId++;
+            }
             let setRoleText = text => {
                 updateInnnerHTML(window.videoTogetherFlyPannel.videoTogetherRoleText, text);
             }
@@ -4397,31 +4403,10 @@
                     window.videoTogetherFlyPannel.UpdateStatusText(data.text, data.color);
                     break;
                 case MessageType.JumpToNewPage:
-                    try {
-                        let currentUrl = new URL(window.location);
-                        let newUrl = new URL(data.url);
-                        let compareCurrentUrl = new URL(currentUrl);
-                        let compareNewUrl = new URL(newUrl);
-                        compareCurrentUrl.searchParams.delete("VideoTogetherUrl");
-                        compareCurrentUrl.searchParams.delete("VideoTogetherRoomName");
-                        compareCurrentUrl.searchParams.delete("VideoTogetherRole");
-                        compareCurrentUrl.searchParams.delete("VideoTogetherPassword");
-                        compareCurrentUrl.searchParams.delete("VideoTogetherTimestamp");
-                        compareNewUrl.searchParams.delete("VideoTogetherUrl");
-                        compareNewUrl.searchParams.delete("VideoTogetherRoomName");
-                        compareNewUrl.searchParams.delete("VideoTogetherRole");
-                        compareNewUrl.searchParams.delete("VideoTogetherPassword");
-                        compareNewUrl.searchParams.delete("VideoTogetherTimestamp");
-                        if (compareNewUrl.hash != "") {
-                            compareCurrentUrl.hash = "";
-                            compareNewUrl.hash = "";
-                        }
-                        if (compareCurrentUrl.href == compareNewUrl.href) {
-                            extension.url = data.url;
-                            break;
-                        }
-                    } catch { }
-                    window.location = data.url;
+                    if (data.navigationId && data.navigationId != this.pendingMemberNavigation?.id) {
+                        break;
+                    }
+                    this.jumpToPage(data.url);
                     break;
                 case MessageType.ChangeVideoVolume:
                     this.ForEachVideo(video => {
@@ -4506,7 +4491,14 @@
                     break;
                 }
                 case MessageType.SetTabStorageSuccess: {
-                    this.SetTabStorageSuccessCallback();
+                    const pending = this.pendingMemberNavigation;
+                    if (pending && !pending.sent && data
+                        && data.VideoTogetherNavigationId == pending.id
+                        && data.VideoTogetherUrl == pending.url
+                        && data.VideoTogetherRoomName == this.roomName
+                        && data.VideoTogetherRole == this.RoleEnum.Member) {
+                        this.completeMemberNavigation(pending);
+                    }
                     break;
                 }
                 case MessageType.RoomDataNotification: {
@@ -4789,7 +4781,7 @@
                 return false;
             }
             try {
-                return new URL(a).href == new URL(b).href;
+                return this.linkWithoutState(a) == this.linkWithoutState(b);
             } catch {
                 return a == b;
             }
@@ -4803,29 +4795,94 @@
             }
         }
 
-        shouldAutoShareMemberCurrentPage(currentUrl, roomUrl) {
-            if (!getEnableAutoShareOnNavigate()) {
-                return false;
-            }
-            if (this.role != this.RoleEnum.Member || isEmpty(currentUrl) || isEmpty(roomUrl)) {
-                return false;
-            }
-            return !this.areUrlsEquivalent(currentUrl, roomUrl);
+        persistMemberNavigation() {
+            sendMessageToTop(MessageType.SetTabStorage, this.GetRoomState(this.url));
+            this.SaveStateToSessionStorageWhenSameOrigin(this.url);
         }
 
-        async autoShareMemberCurrentPage(currentUrl, roomUrl) {
-            if (isEmpty(currentUrl) || this.areUrlsEquivalent(currentUrl, roomUrl)) {
+        jumpToPage(url) {
+            const current = new URL(this.getCurrentPageUrlWithoutState());
+            const target = new URL(this.linkWithoutState(url));
+            const samePage = current.href == target.href;
+            const sameDocument = current.origin == target.origin
+                && current.pathname == target.pathname && current.search == target.search;
+            if (!samePage) {
+                window.location = url;
+            }
+            // A hash change stays in this document; it must update the URL rather
+            // than being discarded, and must not leave a pending full-page jump.
+            if (sameDocument && this.pendingMemberNavigation
+                && this.areUrlsEquivalent(this.pendingMemberNavigation.url, url)) {
+                this.pendingMemberNavigation = null;
+                this.memberPageUrl = target.href;
+                this.persistMemberNavigation();
+            }
+        }
+
+        completeMemberNavigation(pending) {
+            if (this.pendingMemberNavigation != pending || pending.sent || !pending.ready) {
                 return;
             }
-            const now = Date.now() / 1000;
-            if (this.areUrlsEquivalent(currentUrl, this.lastAutoSharedMemberPageUrl)
-                && this.lastAutoSharedMemberPageTs + 600 > now) {
-                return;
+            pending.sent = true;
+            let url = pending.url;
+            if (!window.VideoTogetherStorage?.VideoTogetherTabStorageEnabled
+                && !this.SaveStateToSessionStorageWhenSameOrigin(url)) {
+                url = this.linkWithMemberState(url).toString();
             }
-            this.lastAutoSharedMemberPageUrl = currentUrl;
-            this.lastAutoSharedMemberPageTs = now;
-            const msgId = generateUUID();
-            await WS.sendTextMessage(msgId, `/share ${currentUrl}`);
+            sendMessageToTop(MessageType.JumpToNewPage, { url, navigationId: pending.id });
+        }
+
+        async syncMemberNavigation(roomUrl) {
+            if (isEmpty(roomUrl)) {
+                return false;
+            }
+            if (this.pendingMemberNavigation
+                && this.areUrlsEquivalent(this.pendingMemberNavigation.url, roomUrl)) {
+                return true;
+            }
+            const currentUrl = this.getCurrentPageUrlWithoutState();
+            const roomChanged = !this.areUrlsEquivalent(this.url, roomUrl);
+            const memberNavigated = !roomChanged && !isEmpty(this.memberPageUrl)
+                && !this.areUrlsEquivalent(currentUrl, this.memberPageUrl);
+            const shouldShare = memberNavigated && getEnableAutoShareOnNavigate()
+                && !this.areUrlsEquivalent(currentUrl, roomUrl) && !isEasyShareMember();
+            const shouldJump = (roomChanged || memberNavigated)
+                && !this.areUrlsEquivalent(currentUrl, roomUrl)
+                && !window.VideoTogetherStorage?.DisableRedirectJoin;
+
+            this.pendingMemberNavigation = null;
+            this.url = roomUrl;
+            // An empty page URL means the next document was opened by room sync.
+            // Recovery accepts its actual URL, including redirects by the site.
+            this.memberPageUrl = shouldJump ? "" : currentUrl;
+            const pending = shouldJump ? { id: generateUUID(), url: roomUrl, sent: false, ready: false } : null;
+            this.pendingMemberNavigation = pending;
+            if (shouldShare) {
+                try {
+                    await WS.sendTextMessage(generateUUID(), `/share ${currentUrl}`);
+                } catch (e) {
+                    console.error(e);
+                }
+            }
+            // A newer room response or leaving the room invalidates this transition.
+            if (this.pendingMemberNavigation != pending || this.url != roomUrl
+                || this.role != this.RoleEnum.Member) {
+                return true;
+            }
+            if (pending) {
+                pending.ready = true;
+            }
+            this.persistMemberNavigation();
+            if (pending) {
+                if (isWeb() && window.location.origin != new URL(roomUrl).origin) {
+                    alert("ジャンプ後に再度参加してください");
+                }
+                if (!window.VideoTogetherStorage?.VideoTogetherTabStorageEnabled) {
+                    this.completeMemberNavigation(pending);
+                }
+                return true;
+            }
+            return false;
         }
 
         async SyncTimeWithServer(url = null) {
@@ -4851,8 +4908,7 @@
                 let password = getFunc("VideoTogetherPassword");
                 let voice = getFunc("VideoTogetherVoice");
                 let textMessageHistory = this.normalizeTextMessageHistory(getFunc("VideoTogetherTextMessageHistory"));
-                let lastAutoSharedMemberPageUrl = emptyStrIfUdf(getFunc("VideoTogetherLastAutoSharedMemberPageUrl"));
-                let lastAutoSharedMemberPageTs = parseFloat(getFunc("VideoTogetherLastAutoSharedMemberPageTs"));
+                let memberPageUrl = emptyStrIfUdf(getFunc("VideoTogetherMemberPageUrl"));
                 if (timestamp + 60 < Date.now() / 1000) {
                     return;
                 }
@@ -4863,8 +4919,7 @@
                         this.url = vtUrl;
                         this.roomName = vtRoomName;
                         this.password = password;
-                        this.lastAutoSharedMemberPageUrl = lastAutoSharedMemberPageUrl;
-                        this.lastAutoSharedMemberPageTs = isNaN(lastAutoSharedMemberPageTs) ? 0 : lastAutoSharedMemberPageTs;
+                        this.memberPageUrl = memberPageUrl || this.getCurrentPageUrlWithoutState();
                         window.videoTogetherFlyPannel.inputRoomName.value = vtRoomName;
                         window.videoTogetherFlyPannel.inputRoomPassword.value = password;
                         window.videoTogetherFlyPannel.setTextMessageHistory(textMessageHistory);
@@ -5084,7 +5139,13 @@
                         break;
                     }
                     case this.RoleEnum.Member: {
-                        let room = await this.GetRoom(this.roomName, this.password);
+                        const requestId = ++this.memberRoomRequestId;
+                        const roomName = this.roomName;
+                        let room = await this.GetRoom(roomName, this.password);
+                        if (requestId != this.memberRoomRequestId || this.role != this.RoleEnum.Member
+                            || this.roomName != roomName) {
+                            return;
+                        }
                         sendMessageToTop(MessageType.RoomDataNotification, room);
                         this.duration = room["duration"];
                         let newUrl = room["url"];
@@ -5099,40 +5160,8 @@
                                 window.VideoTogetherEasyShareTitle = room['videoTitle'];
                             }
                         }
-                        if (newUrl != this.url && (window.VideoTogetherStorage == undefined || !window.VideoTogetherStorage.DisableRedirectJoin)) {
-                            const currentPageUrl = this.getCurrentPageUrlWithoutState();
-                            if (this.shouldAutoShareMemberCurrentPage(currentPageUrl, newUrl)) {
-                                await this.autoShareMemberCurrentPage(currentPageUrl, newUrl);
-                            }
-                            if (window.VideoTogetherStorage != undefined && window.VideoTogetherStorage.VideoTogetherTabStorageEnabled) {
-                                let state = this.GetRoomState(newUrl);
-                                sendMessageToTop(MessageType.SetTabStorage, state);
-                                setInterval(() => {
-                                    if (window.VideoTogetherStorage.VideoTogetherTabStorage.VideoTogetherUrl == newUrl) {
-                                        try {
-                                            if (isWeb()) {
-                                                if (!this._jumping && window.location.origin != (new URL(newUrl).origin)) {
-                                                    this._jumping = true;
-                                                    alert("ジャンプ後に再度参加してください");
-                                                }
-                                            }
-                                        } catch { };
-                                        this.SetTabStorageSuccessCallback = () => {
-                                            sendMessageToTop(MessageType.JumpToNewPage, { url: newUrl });
-                                            this.SetTabStorageSuccessCallback = () => { };
-                                        }
-                                    }
-                                }, 200);
-                            } else {
-                                if (this.SaveStateToSessionStorageWhenSameOrigin(newUrl)) {
-                                    sendMessageToTop(MessageType.JumpToNewPage, { url: newUrl });
-                                } else {
-                                    sendMessageToTop(MessageType.JumpToNewPage, { url: this.linkWithMemberState(newUrl).toString() });
-                                }
-                            }
-                        } else {
-                            let state = this.GetRoomState("");
-                            sendMessageToTop(MessageType.SetTabStorage, state);
+                        if (await this.syncMemberNavigation(newUrl)) {
+                            break;
                         }
                         if (this.PlayAdNow()) {
                             throw new Error("広告再生中");
@@ -5338,8 +5367,8 @@
                 VideoVolume: this.getVideoVolume(),
                 VoiceVolume: this.getVoiceVolume(),
                 VideoTogetherTextMessageHistory: this.getTextMessageHistoryState(),
-                VideoTogetherLastAutoSharedMemberPageUrl: this.lastAutoSharedMemberPageUrl,
-                VideoTogetherLastAutoSharedMemberPageTs: this.lastAutoSharedMemberPageTs
+                VideoTogetherMemberPageUrl: this.memberPageUrl,
+                VideoTogetherNavigationId: this.pendingMemberNavigation?.id || ""
             }
         }
 
@@ -5362,8 +5391,7 @@
                     window.sessionStorage.setItem("VideoTogetherRole", this.role);
                     window.sessionStorage.setItem("VideoTogetherTimestamp", Date.now() / 1000);
                     window.sessionStorage.setItem("VideoTogetherTextMessageHistory", JSON.stringify(this.getTextMessageHistoryState()));
-                    window.sessionStorage.setItem("VideoTogetherLastAutoSharedMemberPageUrl", this.lastAutoSharedMemberPageUrl);
-                    window.sessionStorage.setItem("VideoTogetherLastAutoSharedMemberPageTs", this.lastAutoSharedMemberPageTs);
+                    window.sessionStorage.setItem("VideoTogetherMemberPageUrl", this.memberPageUrl);
                     return sameOrigin;
                 } else {
                     return false;
